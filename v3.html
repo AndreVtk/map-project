@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Map V3</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <style>
+    #map { height: 100vh; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+
+<script>
+const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
+
+var map = L.map('map').setView([51.1079, 17.0385], 11);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap & Carto'
+}).addTo(map);
+
+// 📍 пользователь
+let userLocation = null;
+
+navigator.geolocation.getCurrentPosition(pos => {
+  userLocation = [pos.coords.latitude, pos.coords.longitude];
+
+  L.marker(userLocation).addTo(map)
+    .bindPopup("📍 Ты здесь").openPopup();
+
+  L.circle(userLocation, {
+    radius: 3000,
+    color: "blue",
+    fillOpacity: 0.1
+  }).addTo(map);
+});
+
+// центр
+const cityCenter = [51.1079, 17.0385];
+
+// hotspots
+const hotspots = [
+  [51.108, 17.038],
+  [51.095, 17.034],
+  [51.102, 16.885],
+];
+
+// сетка
+const hexes = h3.polyfill(
+  [
+    [51.5, 16.5],
+    [51.5, 17.7],
+    [50.7, 17.7],
+    [50.7, 16.5]
+  ],
+  9
+);
+
+let hexData = [];
+let bestHex = null;
+let bestScore = 0;
+
+// traffic
+async function getTraffic(lat, lng) {
+  try {
+    const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    return data.flowSegmentData.currentSpeed / data.flowSegmentData.freeFlowSpeed;
+  } catch {
+    return 0.5;
+  }
+}
+
+// init
+async function init() {
+  for (let h of hexes) {
+
+    if (Math.random() < 0.7) continue;
+
+    const boundary = h3.h3ToGeoBoundary(h);
+    const latlngs = boundary.map(c => [c[0], c[1]]);
+    const center = h3.h3ToGeo(h);
+
+    let polygon = L.polygon(latlngs, {
+      weight: 0.5,
+      opacity: 0,
+      fillOpacity: 0
+    }).addTo(map);
+
+    hexData.push({ polygon, center });
+  }
+
+  update();
+}
+
+// update
+async function update() {
+  let hour = new Date().getHours();
+
+  bestHex = null;
+  bestScore = 0;
+
+  for (let hex of hexData) {
+
+    let traffic = await getTraffic(hex.center[0], hex.center[1]);
+
+    let timeFactor =
+      hour >= 7 && hour <= 10 ? 1.5 :
+      hour >= 16 && hour <= 21 ? 1.7 :
+      hour >= 22 || hour <= 5 ? 0.5 :
+      1;
+
+    let distCenter = map.distance(hex.center, cityCenter);
+    let centerFactor = Math.max(0.4, 1.6 - distCenter / 20000);
+
+    let hotspotBoost = 1;
+    hotspots.forEach(p => {
+      let d = map.distance(hex.center, p);
+      if (d < 2000) hotspotBoost += 0.5;
+    });
+
+    let demand = traffic * timeFactor * centerFactor * hotspotBoost;
+
+    // немного жизни
+    if (demand < 0.4) demand = Math.random() * 0.6;
+
+    // штраф за дальность от тебя
+    let distancePenalty = 1;
+    if (userLocation) {
+      let d = map.distance(hex.center, userLocation);
+      distancePenalty = Math.max(0.3, 1 - d / 15000);
+    }
+
+    let finalScore = demand * distancePenalty;
+
+    // ищем лучшую точку
+    if (finalScore > bestScore) {
+      bestScore = finalScore;
+      bestHex = hex;
+    }
+
+    // цвета
+    let color = null;
+
+    if (demand > 1.0) color = "red";
+    else if (demand > 0.5) color = "yellow";
+
+    if (!color) {
+      hex.polygon.setStyle({
+        opacity: 0,
+        fillOpacity: 0
+      });
+    } else {
+      hex.polygon.setStyle({
+        color: color,
+        fillColor: color,
+        opacity: 0.8,
+        fillOpacity: 0.6
+      });
+    }
+  }
+
+  // 🎯 показываем куда ехать
+  if (bestHex) {
+    const c = bestHex.center;
+
+    if (window.targetMarker) {
+      window.targetMarker.setLatLng(c);
+    } else {
+      window.targetMarker = L.marker(c).addTo(map)
+        .bindPopup("🔥 ЕХАТЬ СЮДА").openPopup();
+    }
+  }
+
+  setTimeout(update, 20000);
+}
+
+init();
+</script>
+
+</body>
+</html>
