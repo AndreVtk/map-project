@@ -35,11 +35,7 @@ navigator.geolocation.getCurrentPosition(pos => {
   L.marker(userLocation).addTo(map)
     .bindPopup("📍 Ты здесь").openPopup();
 
-  L.circle(userLocation, {
-    radius: 3000,
-    color: "blue",
-    fillOpacity: 0.1
-  }).addTo(map);
+  
 });
 
 // центр
