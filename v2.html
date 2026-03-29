@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Smart Demand Map CLEAN</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <style>
+    #map { height: 100vh; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+
+<script>
+const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
+
+// карта
+var map = L.map('map').setView([51.1079, 17.0385], 11);
+
+// нормальные тайлы
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap & Carto'
+}).addTo(map);
+
+// 📍 твоя позиция
+navigator.geolocation.getCurrentPosition(pos => {
+  const userLat = pos.coords.latitude;
+  const userLng = pos.coords.longitude;
+
+  L.marker([userLat, userLng]).addTo(map)
+    .bindPopup("📍 Ты здесь").openPopup();
+
+  L.circle([userLat, userLng], {
+    radius: 3000,
+    color: "blue",
+    fillOpacity: 0.1
+  }).addTo(map);
+});
+
+// центр
+const cityCenter = [51.1079, 17.0385];
+
+// важные точки
+const hotspots = [
+  [51.108, 17.038], // центр
+  [51.095, 17.034], // вокзал
+  [51.102, 16.885], // аэропорт
+];
+
+// hex сетка
+const hexes = h3.polyfill(
+  [
+    [51.5, 16.5],
+    [51.5, 17.7],
+    [50.7, 17.7],
+    [50.7, 16.5]
+  ],
+  9
+);
+
+let hexData = [];
+
+// 🚗 traffic
+async function getTraffic(lat, lng) {
+  try {
+    const url = `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    return data.flowSegmentData.currentSpeed / data.flowSegmentData.freeFlowSpeed;
+  } catch {
+    return 0.5;
+  }
+}
+
+// 🌧️ погода
+async function getWeather() {
+  try {
+    const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=51.1079&longitude=17.0385&current_weather=true");
+    const data = await res.json();
+
+    return data.current_weather.weathercode;
+  } catch {
+    return 0;
+  }
+}
+
+// 🧠 создаём карту
+async function init() {
+  const weatherCode = await getWeather();
+
+  for (let h of hexes) {
+
+    // уменьшаем нагрузку
+    if (Math.random() < 0.7) continue;
+
+    const boundary = h3.h3ToGeoBoundary(h);
+    const latlngs = boundary.map(c => [c[0], c[1]]);
+    const center = h3.h3ToGeo(h);
+
+    let polygon = L.polygon(latlngs, {
+      weight: 0.5,
+      opacity: 0,
+      fillOpacity: 0
+    }).addTo(map);
+
+    hexData.push({
+      polygon,
+      center,
+      traffic: 0,
+      weather: weatherCode
+    });
+  }
+
+  update();
+}
+
+// 🔄 обновление
+async function update() {
+  let hour = new Date().getHours();
+
+  for (let hex of hexData) {
+
+    hex.traffic = await getTraffic(hex.center[0], hex.center[1]);
+
+    // 🕒 время
+    let timeFactor =
+      hour >= 7 && hour <= 10 ? 1.5 :
+      hour >= 16 && hour <= 21 ? 1.7 :
+      hour >= 22 || hour <= 5 ? 0.4 :
+      1;
+
+    // 📍 центр
+    let dist = map.distance(hex.center, cityCenter);
+    let centerFactor = Math.max(0.4, 1.6 - dist / 20000);
+
+    // 🔥 hotspots
+    let hotspotBoost = 1;
+    hotspots.forEach(p => {
+      let d = map.distance(hex.center, p);
+      if (d < 2000) hotspotBoost += 0.5;
+    });
+
+    // 🌧️ погода
+    let weatherFactor = 1;
+    if (hex.weather >= 50) weatherFactor = 1.3;
+
+    // 🧠 финал
+    let demand =
+      hex.traffic *
+      timeFactor *
+      centerFactor *
+      hotspotBoost *
+      weatherFactor;
+
+    let color = null;
+
+    if (demand > 1.2) {
+      color = "red";
+    } else if (demand > 0.8) {
+      color = "yellow";
+    }
+
+    // ✅ ГЛАВНЫЙ ФИКС — НЕТ СИНИХ
+    if (!color) {
+      hex.polygon.setStyle({
+        opacity: 0,
+        fillOpacity: 0
+      });
+    } else {
+      hex.polygon.setStyle({
+        color: color,
+        fillColor: color,
+        opacity: 0.8,
+        fillOpacity: 0.6
+      });
+    }
+  }
+
+  setTimeout(update, 20000);
+}
+
+init();
+</script>
+
+</body>
+</html>
