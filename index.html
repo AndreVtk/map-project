@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Smart Demand Map v3</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+  <style>
+    body { margin: 0; }
+    #map { height: 100vh; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+
+<script>
+
+const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
+
+var map = L.map('map').setView([51.1079, 17.0385], 11);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+
+
+// =======================
+// 🌦 ПОГОДА
+// =======================
+let weatherFactor = 1;
+
+async function loadWeather() {
+  try {
+    const res = await fetch("https://api.open-meteo.com/v1/forecast?latitude=51.10&longitude=17.03&current_weather=true");
+    const data = await res.json();
+
+    const temp = data.current_weather.temperature;
+
+    if (temp < 5) weatherFactor = 1.3;
+    else if (temp > 25) weatherFactor = 1.2;
+    else weatherFactor = 1;
+
+  } catch(e) {}
+}
+
+loadWeather();
+setInterval(loadWeather, 600000);
+
+
+// =======================
+// 🔶 HEX
+// =======================
+const hexes = h3.polyfill(
+  [
+    [51.35, 16.70],
+    [51.35, 17.50],
+    [50.90, 17.50],
+    [50.90, 16.70]
+  ],
+  10
+);
+
+let polygons = {};
+let trafficMap = {};
+
+
+// =======================
+// 🚗 ТРАФИК
+// =======================
+async function loadTrafficForHex(h) {
+  const center = h3.h3ToGeo(h);
+
+  try {
+    const res = await fetch(
+      `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${center[0]},${center[1]}&key=${TOMTOM_KEY}`
+    );
+
+    const data = await res.json();
+
+    if (data.flowSegmentData) {
+      const free = data.flowSegmentData.freeFlowSpeed;
+      const current = data.flowSegmentData.currentSpeed;
+
+      trafficMap[h] = current > 0 ? free / current : 1;
+    }
+
+  } catch(e) {
+    trafficMap[h] = 1;
+  }
+}
+
+
+// батч загрузка
+let index = 0;
+
+setInterval(() => {
+  for (let i = 0; i < 10; i++) {
+    if (index >= hexes.length) return;
+    loadTrafficForHex(hexes[index]);
+    index++;
+  }
+}, 2000);
+
+
+// =======================
+// 🧠 СПРОС
+// =======================
+function getDemand(hex) {
+  let base = Math.random();
+  let traffic = trafficMap[hex] || 1;
+  return base * traffic * weatherFactor;
+}
+
+
+// =======================
+// 🔄 ОБНОВЛЕНИЕ
+// =======================
+setInterval(() => {
+
+  hexes.forEach(h => {
+
+    let demand = getDemand(h);
+
+    let color = null;
+
+    if (demand > 1.4) color = "red";
+    else if (demand > 1.0) color = "yellow";
+
+    // ❌ если слабый спрос — удаляем
+    if (!color) {
+      if (polygons[h]) {
+        map.removeLayer(polygons[h]);
+        delete polygons[h];
+      }
+      return;
+    }
+
+    const boundary = h3.h3ToGeoBoundary(h);
+    const latlngs = boundary.map(c => [c[0], c[1]]);
+
+    // если уже есть — обновляем
+    if (polygons[h]) {
+      polygons[h].setStyle({
+        fillColor: color,
+        color: color
+      });
+    } else {
+      // если нет — создаём
+      polygons[h] = L.polygon(latlngs, {
+        color: color,
+        fillColor: color,
+        weight: 0.7,
+        fillOpacity: 0.6
+      }).addTo(map);
+    }
+
+  });
+
+}, 4000);
+
+</script>
+
+</body>
+</html>
