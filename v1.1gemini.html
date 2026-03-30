@@ -2,46 +2,52 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Map v7 - Traffic Focus</title>
+  <title>Wrocław Traffic Monitor v8</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { margin: 0; font-family: -apple-system, system-ui, sans-serif; overflow: hidden; background: #f8f9fa; }
     #map { height: 100vh; width: 100vw; z-index: 1; }
 
+    /* Кнопка открытия меню */
     .menu-toggle {
       position: absolute; bottom: 25px; right: 25px; z-index: 1000;
-      width: 42px; height: 42px; background: #fff; border-radius: 50%;
+      width: 44px; height: 44px; background: #fff; border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.2); cursor: pointer; font-size: 18px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2); cursor: pointer; font-size: 20px;
     }
 
+    /* Выпадающее меню */
     .mobile-menu {
-      position: absolute; bottom: 80px; right: 25px; z-index: 1000;
-      background: rgba(255, 255, 255, 0.98); width: 200px;
+      position: absolute; bottom: 85px; right: 25px; z-index: 1000;
+      background: rgba(255, 255, 255, 0.98); width: 210px;
       border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-      display: none; padding: 12px; flex-direction: column; gap: 8px;
-      backdrop-filter: blur(5px);
+      display: none; padding: 15px; flex-direction: column; gap: 10px;
+      backdrop-filter: blur(10px);
     }
     .mobile-menu.active { display: flex; }
 
-    .status-mini { font-size: 10px; color: #555; line-height: 1.4; border-bottom: 1px solid #eee; padding-bottom: 6px; }
+    .status-mini { font-size: 11px; color: #444; line-height: 1.5; border-bottom: 1px solid #eee; padding-bottom: 8px; }
+    .status-mini b { color: #000; }
+    
+    .btn-row { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .btn {
-      background: #f0f0f0; border: none; padding: 10px; border-radius: 8px;
-      font-size: 13px; font-weight: 600; cursor: pointer;
+      background: #f0f0f0; border: none; padding: 12px; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer; text-align: center;
     }
     .btn-geo { background: #007AFF; color: #fff; }
     .btn-test { background: #FFCC00; color: #000; }
 
+    /* Индикатор в углу */
     .live-indicator {
-      position: absolute; top: 10px; left: 10px; z-index: 1000;
-      font-size: 9px; font-weight: bold; color: #444; background: rgba(255,255,255,0.8);
-      padding: 3px 10px; border-radius: 20px; display: flex; align-items: center; gap: 5px;
-      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      position: absolute; top: 15px; left: 15px; z-index: 1000;
+      font-size: 10px; font-weight: bold; color: #444; background: rgba(255,255,255,0.85);
+      padding: 4px 12px; border-radius: 20px; display: flex; align-items: center; gap: 6px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
     }
-    .dot { width: 6px; height: 6px; background: #28C76F; border-radius: 50%; }
+    .dot { width: 7px; height: 7px; background: #28C76F; border-radius: 50%; }
     .pulse { animation: pulse-green 0.6s ease-out; }
-    @keyframes pulse-green { 0% { transform: scale(1); } 50% { transform: scale(1.5); opacity: 0.5; } 100% { transform: scale(1); } }
+    @keyframes pulse-green { 0% { transform: scale(1); } 50% { transform: scale(1.6); opacity: 0.4; } 100% { transform: scale(1); } }
   </style>
 </head>
 <body>
@@ -51,13 +57,15 @@
 
 <div class="mobile-menu" id="mainMenu">
   <div class="status-mini">
-    🌤 Weather: <b id="st-wtr">Clear</b><br>
-    🚗 Traffic: <b id="st-traffic">Monitoring</b><br>
-    🧊 H3: <b id="st-hex">Ready</b>
+    🌤 Погода: <b id="st-wtr">Загрузка...</b><br>
+    🚗 Трафик: <b id="st-traffic">Ожидание</b><br>
+    🧊 Сетка: <b id="st-hex">Ready</b>
   </div>
-  <button class="btn" onclick="toggleTheme()">🌓 Переключить тему</button>
-  <button class="btn btn-geo" onclick="findMe()">📍 Где я?</button>
-  <button class="btn btn-test" onclick="runTest()">🧪 Тест (Трафик)</button>
+  <div class="btn-row">
+    <button class="btn" onclick="toggleTheme()">🌓 Сменить тему</button>
+    <button class="btn btn-geo" onclick="findMe()">📍 Найти меня</button>
+    <button class="btn btn-test" onclick="runTest()">🧪 Тест (8 сек)</button>
+  </div>
 </div>
 
 <div id="map"></div>
@@ -69,45 +77,45 @@
 const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
 const CENTER = [51.1079, 17.0385];
 
+// Настройка карты
 const map = L.map('map', { zoomControl: false, attributionControl: false }).setView(CENTER, 13);
-const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
-const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
 let isDark = false;
 
 function toggleMenu() { document.getElementById('mainMenu').classList.toggle('active'); }
 function toggleTheme() {
-    isDark ? (map.removeLayer(dark), light.addTo(map)) : (map.removeLayer(light), dark.addTo(map));
+    isDark ? (map.removeLayer(darkTiles), lightTiles.addTo(map)) : (map.removeLayer(lightTiles), darkTiles.addTo(map));
     isDark = !isDark; toggleMenu();
 }
 
+// Данные
 let rainFactor = 1.0, trafficMap = {}, polygons = {}, testMode = false;
 const hexLayer = L.layerGroup().addTo(map);
 
-// Гео
-const userMarker = L.circleMarker([0,0], { radius: 6, color: '#fff', fillColor: '#007AFF', fillOpacity: 1, weight: 2 }).addTo(map);
+// Геолокация
+const userMarker = L.circleMarker([0,0], { radius: 7, color: '#fff', fillColor: '#007AFF', fillOpacity: 1, weight: 2.5 }).addTo(map);
 map.on('locationfound', (e) => userMarker.setLatLng(e.latlng));
 function findMe() { map.locate({setView: true, maxZoom: 15}); toggleMenu(); }
 
-// Погода: только осадки
+// Погода (только осадки)
 async function updateWeather() {
     try {
         const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CENTER[0]}&longitude=${CENTER[1]}&current_weather=true`);
         const data = await res.json();
         const code = data.current_weather.weathercode;
-        // Коды 51-99: дождь, снег, гроза
-        if (code >= 51) {
-            rainFactor = 1.4; 
-            document.getElementById('st-wtr').innerText = "Rain/Snow (x1.4)";
-        } else {
-            rainFactor = 1.0;
-            document.getElementById('st-wtr').innerText = "Clear (x1.0)";
-        }
-    } catch(e) {}
+        // Коды 51-99: дождь, снег и прочее веселье
+        rainFactor = (code >= 51) ? 1.4 : 1.0;
+        document.getElementById('st-wtr').innerText = (code >= 51) ? `Осадки (x1.4)` : `Ясно (x1.0)`;
+    } catch(e) { document.getElementById('st-wtr').innerText = "Ошибка API"; }
 }
 updateWeather();
 
+// Генерация сетки
 const hexes = h3.polyfill([[51.17, 16.85], [51.17, 17.20], [51.02, 17.20], [51.02, 16.85]], 9);
+document.getElementById('st-hex').innerText = "H3 Res 9";
 
+// Трафик TomTom
 async function loadTraffic(h) {
     if (testMode) return;
     try {
@@ -116,14 +124,24 @@ async function loadTraffic(h) {
         const data = await res.json();
         if (data.flowSegmentData) {
             const { freeFlowSpeed: free, currentSpeed: curr } = data.flowSegmentData;
-            // Коэффициент пробки: если скорость в 2 раза ниже нормы = 2.0
             trafficMap[h] = curr > (free * 0.95) ? 1.0 : (free / curr);
-            document.getElementById('liveDot').classList.add('pulse');
-            setTimeout(() => document.getElementById('liveDot').classList.remove('pulse'), 500);
+            
+            // Обновляем статус в меню: время последнего успеха
+            const now = new Date();
+            const timeStr = now.getHours().toString().padStart(2, '0') + ":" + 
+                            now.getMinutes().toString().padStart(2, '0') + ":" + 
+                            now.getSeconds().toString().padStart(2, '0');
+            document.getElementById('st-traffic').innerText = `Live: ${timeStr}`;
+            
+            // Мигаем точкой в углу
+            const dot = document.getElementById('liveDot');
+            dot.classList.add('pulse');
+            setTimeout(() => dot.classList.remove('pulse'), 500);
         }
-    } catch(e) {}
+    } catch(e) { document.getElementById('st-traffic').innerText = "Limit/Error"; }
 }
 
+// Очередь обновлений
 let tIdx = 0;
 setInterval(() => {
     for(let i=0; i<3; i++) {
@@ -133,17 +151,15 @@ setInterval(() => {
     }
 }, 2000);
 
+// Отрисовка
 function updateMap() {
     hexes.forEach(h => {
         let traffic = trafficMap[h] || 1.0;
-        
-        // В обычном режиме: Пробки * Осадки
-        // В тесте: сильный рандом
-        let demand = testMode ? (Math.random() * 2.5) : (traffic * rainFactor);
+        let demand = testMode ? (Math.random() * 2.6) : (traffic * rainFactor);
 
         let color = null;
-        if (demand > 1.8) color = "#FF3B30"; // КРАСНЫЙ: жесткая пробка или пробка + дождь
-        else if (demand > 1.4) color = "#FFCC00"; // ЖЕЛТЫЙ: средняя тянучка
+        if (demand > 1.8) color = "#FF3B30"; // Красный (пробка)
+        else if (demand > 1.4) color = "#FFCC00"; // Оранжевый (тягучка)
 
         if (!color) {
             if (polygons[h]) { hexLayer.removeLayer(polygons[h]); delete polygons[h]; }
@@ -154,7 +170,13 @@ function updateMap() {
             polygons[h].setStyle({ fillColor: color, color: color });
         } else {
             const coords = h3.h3ToGeoBoundary(h).map(c => [c[0], c[1]]);
-            polygons[h] = L.polygon(coords, { fillColor: color, color: color, weight: 0.5, fillOpacity: 0.45, interactive: false }).addTo(hexLayer);
+            polygons[h] = L.polygon(coords, { 
+                fillColor: color, 
+                color: color, 
+                weight: 0.5, 
+                fillOpacity: 0.45, 
+                interactive: false 
+            }).addTo(hexLayer);
         }
     });
 }
