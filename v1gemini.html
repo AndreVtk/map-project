@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Map v3 - Precision Mode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #map { height: 100vh; width: 100%; }
+    
+    /* Стили кнопок управления */
+    .controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .btn {
+      background: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    .btn:active { background: #eee; }
+    .status-panel {
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    }
+  </style>
+</head>
+<body>
+
+<div class="controls">
+  <div class="status-panel" id="status">Status: Waiting...</div>
+  <button class="btn" onclick="toggleTheme()">🌓 Сменить тему</button>
+  <button class="btn" onclick="findMe()">📍 Где я?</button>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+
+<script>
+const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
+const CENTER = [51.1079, 17.0385];
+
+// --- Инициализация карты ---
+const map = L.map('map', { zoomControl: false }).setView(CENTER, 13);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png');
+const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+
+lightTiles.addTo(map);
+let isDark = false;
+
+function toggleTheme() {
+    if (isDark) {
+        map.removeLayer(darkTiles);
+        lightTiles.addTo(map);
+    } else {
+        map.removeLayer(lightTiles);
+        darkTiles.addTo(map);
+    }
+    isDark = !isDark;
+}
+
+// --- Геолокация ---
+const userMarker = L.circleMarker([0,0], { radius: 8, color: '#fff', fillColor: '#2196F3', fillOpacity: 1, weight: 3 }).addTo(map);
+
+map.on('locationfound', (e) => {
+    userMarker.setLatLng(e.latlng);
+    map.flyTo(e.latlng, 14);
+    document.getElementById('status').innerText = "Status: Location found";
+});
+
+function findMe() {
+    map.locate({setView: true, maxZoom: 15});
+}
+
+// --- Логика Данных ---
+let weatherFactor = 1.0;
+let trafficMap = {};
+let polygons = {};
+const hexLayer = L.layerGroup().addTo(map);
+
+// 🌦 Погода (Open-Meteo)
+async function updateWeather() {
+    try {
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CENTER[0]}&longitude=${CENTER[1]}&current_weather=true`);
+        const data = await res.json();
+        const t = data.current_weather.temperature;
+        // Только реальные условия меняют коэффициент
+        weatherFactor = (t < 3 || t > 30) ? 1.2 : 1.0;
+        console.log("Weather Factor:", weatherFactor);
+    } catch(e) {}
+}
+updateWeather();
+
+// 🚗 Трафик (TomTom)
+async function loadTraffic(h) {
+    const [lat, lng] = h3.h3ToGeo(h);
+    try {
+        const res = await fetch(`https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`);
+        const data = await res.json();
+        if (data.flowSegmentData) {
+            const { freeFlowSpeed: free, currentSpeed: curr } = data.flowSegmentData;
+            // Если едем со скоростью потока (как сейчас в воскресенье) — коэффициент 1.0
+            trafficMap[h] = curr > (free * 0.9) ? 1.0 : (free / curr);
+        }
+    } catch(e) { trafficMap[h] = 1.0; }
+}
+
+// --- Генерация сетки ---
+// Берем зону поменьше, чтобы не перегружать API TomTom
+const bbox = [
+    [51.15, 16.95],
+    [51.15, 17.15],
+    [51.05, 17.15],
+    [51.05, 16.95]
+];
+const hexes = h3.polyfill(bbox, 9);
+
+// Очередь обновления трафика
+let tIdx = 0;
+setInterval(() => {
+    for(let i=0; i<3; i++) { // Медленнее, чтобы не спамить API
+        if(tIdx >= hexes.length) tIdx = 0;
+        loadTraffic(hexes[tIdx]);
+        tIdx++;
+    }
+}, 2000);
+
+// --- Отрисовка спроса ---
+function updateDemand() {
+    hexes.forEach(h => {
+        const traffic = trafficMap[h] || 1.0;
+        
+        // ЖЕСТКАЯ СОРТИРОВКА:
+        // Если пробок нет (1.0) и погода норм (1.0) -> спрос 1.0.
+        // Добавляем микро-рандом только для "живости", но не выше порога активации.
+        let demand = traffic * weatherFactor * (0.9 + Math.random() * 0.2);
+
+        let color = null;
+        if (demand > 1.5) color = "#f03"; // Высокий (Красный)
+        else if (demand > 1.2) color = "#ff9f00"; // Средний (Оранжевый)
+
+        // Если спрос низкий — удаляем полигон
+        if (!color) {
+            if (polygons[h]) {
+                hexLayer.removeLayer(polygons[h]);
+                delete polygons[h];
+            }
+            return;
+        }
+
+        const coords = h3.h3ToGeoBoundary(h).map(c => [c[0], c[1]]);
+        if (polygons[h]) {
+            polygons[h].setStyle({ fillColor: color, color: color });
+        } else {
+            polygons[h] = L.polygon(coords, {
+                fillColor: color,
+                color: color,
+                weight: 1,
+                fillOpacity: 0.5,
+                interactive: false
+            }).addTo(hexLayer);
+        }
+    });
+}
+
+setInterval(updateDemand, 4000);
+</script>
+
+</body>
+</html>
