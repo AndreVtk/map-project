@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Map v7 - Traffic Focus</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { margin: 0; font-family: -apple-system, system-ui, sans-serif; overflow: hidden; background: #f8f9fa; }
+    #map { height: 100vh; width: 100vw; z-index: 1; }
+
+    .menu-toggle {
+      position: absolute; bottom: 25px; right: 25px; z-index: 1000;
+      width: 42px; height: 42px; background: #fff; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.2); cursor: pointer; font-size: 18px;
+    }
+
+    .mobile-menu {
+      position: absolute; bottom: 80px; right: 25px; z-index: 1000;
+      background: rgba(255, 255, 255, 0.98); width: 200px;
+      border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+      display: none; padding: 12px; flex-direction: column; gap: 8px;
+      backdrop-filter: blur(5px);
+    }
+    .mobile-menu.active { display: flex; }
+
+    .status-mini { font-size: 10px; color: #555; line-height: 1.4; border-bottom: 1px solid #eee; padding-bottom: 6px; }
+    .btn {
+      background: #f0f0f0; border: none; padding: 10px; border-radius: 8px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+    }
+    .btn-geo { background: #007AFF; color: #fff; }
+    .btn-test { background: #FFCC00; color: #000; }
+
+    .live-indicator {
+      position: absolute; top: 10px; left: 10px; z-index: 1000;
+      font-size: 9px; font-weight: bold; color: #444; background: rgba(255,255,255,0.8);
+      padding: 3px 10px; border-radius: 20px; display: flex; align-items: center; gap: 5px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .dot { width: 6px; height: 6px; background: #28C76F; border-radius: 50%; }
+    .pulse { animation: pulse-green 0.6s ease-out; }
+    @keyframes pulse-green { 0% { transform: scale(1); } 50% { transform: scale(1.5); opacity: 0.5; } 100% { transform: scale(1); } }
+  </style>
+</head>
+<body>
+
+<div class="live-indicator"><div class="dot" id="liveDot"></div> SYSTEM ACTIVE</div>
+<div class="menu-toggle" onclick="toggleMenu()">⚙️</div>
+
+<div class="mobile-menu" id="mainMenu">
+  <div class="status-mini">
+    🌤 Weather: <b id="st-wtr">Clear</b><br>
+    🚗 Traffic: <b id="st-traffic">Monitoring</b><br>
+    🧊 H3: <b id="st-hex">Ready</b>
+  </div>
+  <button class="btn" onclick="toggleTheme()">🌓 Переключить тему</button>
+  <button class="btn btn-geo" onclick="findMe()">📍 Где я?</button>
+  <button class="btn btn-test" onclick="runTest()">🧪 Тест (Трафик)</button>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
+
+<script>
+const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
+const CENTER = [51.1079, 17.0385];
+
+const map = L.map('map', { zoomControl: false, attributionControl: false }).setView(CENTER, 13);
+const light = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png').addTo(map);
+const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+let isDark = false;
+
+function toggleMenu() { document.getElementById('mainMenu').classList.toggle('active'); }
+function toggleTheme() {
+    isDark ? (map.removeLayer(dark), light.addTo(map)) : (map.removeLayer(light), dark.addTo(map));
+    isDark = !isDark; toggleMenu();
+}
+
+let rainFactor = 1.0, trafficMap = {}, polygons = {}, testMode = false;
+const hexLayer = L.layerGroup().addTo(map);
+
+// Гео
+const userMarker = L.circleMarker([0,0], { radius: 6, color: '#fff', fillColor: '#007AFF', fillOpacity: 1, weight: 2 }).addTo(map);
+map.on('locationfound', (e) => userMarker.setLatLng(e.latlng));
+function findMe() { map.locate({setView: true, maxZoom: 15}); toggleMenu(); }
+
+// Погода: только осадки
+async function updateWeather() {
+    try {
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CENTER[0]}&longitude=${CENTER[1]}&current_weather=true`);
+        const data = await res.json();
+        const code = data.current_weather.weathercode;
+        // Коды 51-99: дождь, снег, гроза
+        if (code >= 51) {
+            rainFactor = 1.4; 
+            document.getElementById('st-wtr').innerText = "Rain/Snow (x1.4)";
+        } else {
+            rainFactor = 1.0;
+            document.getElementById('st-wtr').innerText = "Clear (x1.0)";
+        }
+    } catch(e) {}
+}
+updateWeather();
+
+const hexes = h3.polyfill([[51.17, 16.85], [51.17, 17.20], [51.02, 17.20], [51.02, 16.85]], 9);
+
+async function loadTraffic(h) {
+    if (testMode) return;
+    try {
+        const [lat, lng] = h3.h3ToGeo(h);
+        const res = await fetch(`https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`);
+        const data = await res.json();
+        if (data.flowSegmentData) {
+            const { freeFlowSpeed: free, currentSpeed: curr } = data.flowSegmentData;
+            // Коэффициент пробки: если скорость в 2 раза ниже нормы = 2.0
+            trafficMap[h] = curr > (free * 0.95) ? 1.0 : (free / curr);
+            document.getElementById('liveDot').classList.add('pulse');
+            setTimeout(() => document.getElementById('liveDot').classList.remove('pulse'), 500);
+        }
+    } catch(e) {}
+}
+
+let tIdx = 0;
+setInterval(() => {
+    for(let i=0; i<3; i++) {
+        if(tIdx >= hexes.length) tIdx = 0;
+        loadTraffic(hexes[tIdx]);
+        tIdx++;
+    }
+}, 2000);
+
+function updateMap() {
+    hexes.forEach(h => {
+        let traffic = trafficMap[h] || 1.0;
+        
+        // В обычном режиме: Пробки * Осадки
+        // В тесте: сильный рандом
+        let demand = testMode ? (Math.random() * 2.5) : (traffic * rainFactor);
+
+        let color = null;
+        if (demand > 1.8) color = "#FF3B30"; // КРАСНЫЙ: жесткая пробка или пробка + дождь
+        else if (demand > 1.4) color = "#FFCC00"; // ЖЕЛТЫЙ: средняя тянучка
+
+        if (!color) {
+            if (polygons[h]) { hexLayer.removeLayer(polygons[h]); delete polygons[h]; }
+            return;
+        }
+
+        if (polygons[h]) {
+            polygons[h].setStyle({ fillColor: color, color: color });
+        } else {
+            const coords = h3.h3ToGeoBoundary(h).map(c => [c[0], c[1]]);
+            polygons[h] = L.polygon(coords, { fillColor: color, color: color, weight: 0.5, fillOpacity: 0.45, interactive: false }).addTo(hexLayer);
+        }
+    });
+}
+
+function runTest() {
+    testMode = true; toggleMenu();
+    setTimeout(() => { testMode = false; }, 8000);
+}
+
+setInterval(updateMap, 3000);
+</script>
+</body>
+</html>
