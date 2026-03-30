@@ -1,170 +1,189 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html>
 <head>
   <meta charset="utf-8" />
-  <title>Dynamic Demand Map v2</title>
+  <title>Map v3 - Precision Mode</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
-    body { margin: 0; padding: 0; background: #1a1a1a; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     #map { height: 100vh; width: 100%; }
-    .info-panel {
+    
+    /* Стили кнопок управления */
+    .controls {
       position: absolute;
       top: 10px;
       right: 10px;
       z-index: 1000;
-      background: rgba(0,0,0,0.7);
-      color: white;
-      padding: 10px;
-      border-radius: 5px;
-      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .btn {
+      background: white;
+      border: none;
+      padding: 10px 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 14px;
+      transition: background 0.2s;
+    }
+    .btn:active { background: #eee; }
+    .status-panel {
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 12px;
+      border-radius: 8px;
       font-size: 12px;
-      pointer-events: none;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
     }
   </style>
 </head>
 <body>
 
-<div class="info-panel">
-  <b>H3 Resolution:</b> 9<br>
-  <b>Status:</b> Monitoring Wrocław...
+<div class="controls">
+  <div class="status-panel" id="status">Status: Waiting...</div>
+  <button class="btn" onclick="toggleTheme()">🌓 Сменить тему</button>
+  <button class="btn" onclick="findMe()">📍 Где я?</button>
 </div>
+
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script src="https://unpkg.com/h3-js@3.7.2/dist/h3-js.umd.js"></script>
 
 <script>
-// --- КОНФИГУРАЦИЯ ---
 const TOMTOM_KEY = "CrVdJV7ZUJKF6mKpf9M9kF1YJ5qdxxBv";
-const CITY_CENTER = [51.1079, 17.0385];
-const RESOLUTION = 9; // Оптимальный размер для города
+const CENTER = [51.1079, 17.0385];
 
-// Инициализация карты (Темная тема для лучшего контраста)
-const map = L.map('map').setView(CITY_CENTER, 12);
-L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-  attribution: '&copy; OpenStreetMap, &copy; CARTO'
-}).addTo(map);
+// --- Инициализация карты ---
+const map = L.map('map', { zoomControl: false }).setView(CENTER, 13);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
 
+const lightTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png');
+const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png');
+
+lightTiles.addTo(map);
+let isDark = false;
+
+function toggleTheme() {
+    if (isDark) {
+        map.removeLayer(darkTiles);
+        lightTiles.addTo(map);
+    } else {
+        map.removeLayer(lightTiles);
+        darkTiles.addTo(map);
+    }
+    isDark = !isDark;
+}
+
+// --- Геолокация ---
+const userMarker = L.circleMarker([0,0], { radius: 8, color: '#fff', fillColor: '#2196F3', fillOpacity: 1, weight: 3 }).addTo(map);
+
+map.on('locationfound', (e) => {
+    userMarker.setLatLng(e.latlng);
+    map.flyTo(e.latlng, 14);
+    document.getElementById('status').innerText = "Status: Location found";
+});
+
+function findMe() {
+    map.locate({setView: true, maxZoom: 15});
+}
+
+// --- Логика Данных ---
+let weatherFactor = 1.0;
+let trafficMap = {};
+let polygons = {};
 const hexLayer = L.layerGroup().addTo(map);
-let polygons = {}; // Хранилище объектов полигонов
-let trafficMap = {}; // Данные о пробках для каждого гексагона
-let weatherFactor = 1;
 
-// --- ПОГОДА ---
-async function loadWeather() {
-  try {
-    const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CITY_CENTER[0]}&longitude=${CITY_CENTER[1]}&current_weather=true`);
-    const data = await res.json();
-    const temp = data.current_weather.temperature;
-    
-    // Влияние погоды: экстремальные температуры повышают спрос
-    weatherFactor = (temp < 5 || temp > 28) ? 1.25 : 1.0;
-    console.log(`Weather updated: Temp ${temp}°C, Factor: ${weatherFactor}`);
-  } catch(e) {
-    console.error("Weather API error:", e);
-  }
+// 🌦 Погода (Open-Meteo)
+async function updateWeather() {
+    try {
+        const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${CENTER[0]}&longitude=${CENTER[1]}&current_weather=true`);
+        const data = await res.json();
+        const t = data.current_weather.temperature;
+        // Только реальные условия меняют коэффициент
+        weatherFactor = (t < 3 || t > 30) ? 1.2 : 1.0;
+        console.log("Weather Factor:", weatherFactor);
+    } catch(e) {}
 }
-loadWeather();
-setInterval(loadWeather, 600000); // Раз в 10 минут
+updateWeather();
 
-// --- ГЕОМЕТРИЯ H3 ---
-// Создаем сетку вокруг центра города
+// 🚗 Трафик (TomTom)
+async function loadTraffic(h) {
+    const [lat, lng] = h3.h3ToGeo(h);
+    try {
+        const res = await fetch(`https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`);
+        const data = await res.json();
+        if (data.flowSegmentData) {
+            const { freeFlowSpeed: free, currentSpeed: curr } = data.flowSegmentData;
+            // Если едем со скоростью потока (как сейчас в воскресенье) — коэффициент 1.0
+            trafficMap[h] = curr > (free * 0.9) ? 1.0 : (free / curr);
+        }
+    } catch(e) { trafficMap[h] = 1.0; }
+}
+
+// --- Генерация сетки ---
+// Берем зону поменьше, чтобы не перегружать API TomTom
 const bbox = [
-  [51.20, 16.85],
-  [51.20, 17.20],
-  [51.00, 17.20],
-  [51.00, 16.85]
+    [51.15, 16.95],
+    [51.15, 17.15],
+    [51.05, 17.15],
+    [51.05, 16.95]
 ];
-const hexes = h3.polyfill(bbox, RESOLUTION);
-console.log(`Total hexes to monitor: ${hexes.length}`);
+const hexes = h3.polyfill(bbox, 9);
 
-// --- ТРАФИК ---
-async function loadTrafficForHex(h) {
-  const [lat, lng] = h3.h3ToGeo(h);
-  try {
-    const res = await fetch(
-      `https://api.tomtom.com/traffic/services/4/flowSegmentData/absolute/10/json?point=${lat},${lng}&key=${TOMTOM_KEY}`
-    );
-    const data = await res.json();
-    if (data.flowSegmentData) {
-      const { freeFlowSpeed: free, currentSpeed: curr } = data.flowSegmentData;
-      // Если скорость сильно ниже свободной — коэффициент растет
-      trafficMap[h] = curr > 5 ? (free / curr) : 1.5;
-    }
-  } catch(e) {
-    trafficMap[h] = 1.0;
-  }
-}
-
-// Очередь загрузки трафика (по 5 штук каждые 2 сек, чтобы не забанили API)
-let trafficIndex = 0;
+// Очередь обновления трафика
+let tIdx = 0;
 setInterval(() => {
-  for (let i = 0; i < 5; i++) {
-    if (trafficIndex >= hexes.length) {
-        trafficIndex = 0; // Зацикливаем обновление данных
+    for(let i=0; i<3; i++) { // Медленнее, чтобы не спамить API
+        if(tIdx >= hexes.length) tIdx = 0;
+        loadTraffic(hexes[tIdx]);
+        tIdx++;
     }
-    loadTrafficForHex(hexes[trafficIndex]);
-    trafficIndex++;
-  }
 }, 2000);
 
-// --- РАСЧЕТ СПРОСА ---
-function getDemand(h) {
-  const [lat, lng] = h3.h3ToGeo(h);
-  
-  // 1. Базовый спрос зависит от расстояния до центра (в центре всегда выше)
-  const dist = Math.sqrt(Math.pow(lat - CITY_CENTER[0], 2) + Math.pow(lng - CITY_CENTER[1], 2));
-  const locationFactor = Math.max(0.5, 1.5 - (dist * 10)); 
-  
-  // 2. Фактор пробок
-  const traffic = trafficMap[h] || 1.0;
-  
-  // 3. Небольшая случайная составляющая (шум) для живости картинки
-  const randomNoise = 0.8 + Math.random() * 0.4;
+// --- Отрисовка спроса ---
+function updateDemand() {
+    hexes.forEach(h => {
+        const traffic = trafficMap[h] || 1.0;
+        
+        // ЖЕСТКАЯ СОРТИРОВКА:
+        // Если пробок нет (1.0) и погода норм (1.0) -> спрос 1.0.
+        // Добавляем микро-рандом только для "живости", но не выше порога активации.
+        let demand = traffic * weatherFactor * (0.9 + Math.random() * 0.2);
 
-  return locationFactor * traffic * weatherFactor * randomNoise;
+        let color = null;
+        if (demand > 1.5) color = "#f03"; // Высокий (Красный)
+        else if (demand > 1.2) color = "#ff9f00"; // Средний (Оранжевый)
+
+        // Если спрос низкий — удаляем полигон
+        if (!color) {
+            if (polygons[h]) {
+                hexLayer.removeLayer(polygons[h]);
+                delete polygons[h];
+            }
+            return;
+        }
+
+        const coords = h3.h3ToGeoBoundary(h).map(c => [c[0], c[1]]);
+        if (polygons[h]) {
+            polygons[h].setStyle({ fillColor: color, color: color });
+        } else {
+            polygons[h] = L.polygon(coords, {
+                fillColor: color,
+                color: color,
+                weight: 1,
+                fillOpacity: 0.5,
+                interactive: false
+            }).addTo(hexLayer);
+        }
+    });
 }
 
-// --- ВИЗУАЛИЗАЦИЯ ---
-function renderMap() {
-  hexes.forEach(h => {
-    const demand = getDemand(h);
-    let color = null;
-    let opacity = 0;
-
-    // Цветовая шкала спроса
-    if (demand > 1.6) { color = "#ff4d4d"; opacity = 0.6; } // Высокий
-    else if (demand > 1.2) { color = "#ffcc00"; opacity = 0.4; } // Средний
-    else if (demand > 0.9) { color = "#00ffcc"; opacity = 0.15; } // Низкий (фоновый)
-
-    if (!color) {
-      if (polygons[h]) {
-        hexLayer.removeLayer(polygons[h]);
-        delete polygons[h];
-      }
-      return;
-    }
-
-    if (polygons[h]) {
-      // Плавное обновление стиля
-      polygons[h].setStyle({ fillColor: color, color: color, fillOpacity: opacity });
-    } else {
-      // Создание нового полигона
-      const boundary = h3.h3ToGeoBoundary(h).map(c => [c[0], c[1]]);
-      polygons[h] = L.polygon(boundary, {
-        color: color,
-        fillColor: color,
-        weight: 1,
-        fillOpacity: opacity,
-        interactive: false // Для производительности
-      }).addTo(hexLayer);
-    }
-  });
-}
-
-// Запуск цикла отрисовки
-setInterval(renderMap, 3000);
-
+setInterval(updateDemand, 4000);
 </script>
+
 </body>
 </html>
